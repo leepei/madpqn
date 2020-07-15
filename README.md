@@ -1,10 +1,7 @@
 # MADPQN - A Manifold-Aware Distributed Proximal Quasi-Newton Method for Regularized Optimization
 
 This code implements the algorithm proposed in the following paper in C/C++ and MPI:
-_LI Yu-Sheng, CHIANG Wei-Lin, LEE Ching-pei. [Manifold Identification for
-Ultimately Communication-Efficient Distributed Optimization]
-(http://www.optimization-online.org/DB_FILE/2020/06/7833.pdf). The 37th
-International Conference on Machine Learning, 2020._
+_LI Yu-Sheng, CHIANG Wei-Lin, LEE Ching-pei. [Manifold Identification for Ultimately Communication-Efficient Distributed Optimization] (http://www.optimization-online.org/DB_FILE/2020/06/7833.pdf). The 37th International Conference on Machine Learning, 2020._
 
 ## Getting started
 To compile the code, you will need to install g++, and an implementation of MPI.
