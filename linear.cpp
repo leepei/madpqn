@@ -5,7 +5,7 @@
 #include <string.h>
 #include <string>
 #include <stdarg.h>
-#include "locale.h"
+#include <locale.h>
 #include "linear.h"
 #include <mpi.h>
 #include <set>
@@ -462,6 +462,8 @@ double l1r_fun::f_update(double *w, double *step, double Q, double eta, int *ind
 		f_new += loss(i, Xw[i]);
 	f_new *= C;
 	f_new += reg_diff;
+	//If profiling gets sparsity, should consider and only updating individual losses
+	//This should be the case when data has sparsity and the update is extremely sparse
 	mpi_allreduce(&f_new, 1, MPI_DOUBLE, MPI_SUM);
 	communication += 1 / global_n;
 	f_new += reg;
@@ -827,6 +829,7 @@ double l1r_fun::smooth_line_search(double *w, double *smooth_step, double delta,
 		double f_new = 0;
 		for(i=0; i<l; i++)
 			f_new += loss(i, Xw[i]);
+		//If profiling gets sparsity, should consider tracking loss as a sum and only update individual losses
 		mpi_allreduce(&f_new, 1, MPI_DOUBLE, MPI_SUM);
 		f_new = f_new * C + reg + reg_diff * step_size;
 		communication += 1 / global_n;
@@ -900,6 +903,7 @@ double l1r_fun::armijo_line_search(double *step, double *w, double *loss_g, doub
 			cond += loss(i,Xw[i]);
 		cond *= C;
 		cond += reg_diff;
+		//If profiling gets sparsity, should consider tracking loss as a sum and only update individual losses
 		mpi_allreduce(&cond, 1, MPI_DOUBLE, MPI_SUM);
 		communication += 1 / global_n;
 		if (cond + reg - current_f <= delta * localstepsize)
@@ -1285,6 +1289,8 @@ double grouplasso_mlr_fun::f_update(double *w, double *step, double Q, double et
 		f_new += loss(i, Xw + nr_class * i);
 	f_new *= C;
 	f_new += reg_diff;
+	//If profiling gets sparsity, should consider and only updating individual losses
+	//This should be the case when data has sparsity and the update is extremely sparse
 	mpi_allreduce(&f_new, 1, MPI_DOUBLE, MPI_SUM);
 	communication += 1 / global_n;
 	f_new += reg;
@@ -1590,6 +1596,7 @@ double grouplasso_mlr_fun::armijo_line_search(double *step, double *w, double *l
 			cond += loss(i, Xw + nr_class * i);;
 		cond *= C;
 		cond += reg_diff;
+		//If profiling gets sparsity, should consider tracking loss as a sum and only update individual losses
 		mpi_allreduce(&cond, 1, MPI_DOUBLE, MPI_SUM);
 		communication += 1 / global_n;
 		if (cond + reg - current_f <= delta * localstepsize)
@@ -1653,7 +1660,7 @@ double grouplasso_mlr_fun::armijo_line_search(double *step, double *w, double *l
 
 double grouplasso_mlr_fun::smooth_line_search(double *w, double *smooth_step, double delta, double eta, std::vector<int> &index, double *fnew)
 {
-	double discard_threshold = 1e-4; //If the step size is too small then do not take this step
+	double discard_threshold = 1e-8; //If the step size is too small then do not take this step
 	double discard_threshold2 = 1e-9; //If the step size is too small then do not take this step
 	int i,j;
 	int l = prob->l;
@@ -1935,6 +1942,7 @@ protected:
 private:
 	double SpaRSA(double *w, double *loss_g, double *R, double *s, double *y, double gamma, double *local_step, double scaling, int DynamicM, std::vector<int> &index);
 	double newton(double *g, double *step, const std::vector<int> &global_nonzero_set, int max_cg_iter, double *w = NULL);
+	double Q_prox_grad(double *step, double *w, double *g, int global_length, int local_length, int local_start, int *index, double alpha, double *tmps, double *f, int *counter_ret);
 };
 
 static void default_print(const char *buf)
@@ -2004,10 +2012,11 @@ void MADPQN::madpqn(double *w, bool disable_smooth)
 {
 	const double update_eps = 1e-10;//Ensure PD of the LBFGS matrix
 	const double sparse_factor = 0.4;//The sparsity threshold for deciding when we should switch to sparse communication
-	const int max_modify_Q = 30;
+	const int max_modify_Q = 20;
 	const int smooth_trigger = 10;
-	const double ALPHA_MAX = 1e30;
+	const double ALPHA_MAX = 1e10;
 	const double ALPHA_MIN = 1e-4;
+	const int min_inner = 2;
 	//const int switch_threshold = M;
 	int inc = 1;
 	double one = 1.0;
@@ -2016,7 +2025,7 @@ void MADPQN::madpqn(double *w, bool disable_smooth)
 	int n = fun_obj->get_nr_variable();
 
 	int i, k = 0;
-	int iter = 0, iter_print = 0;
+	int inner_iter = 0, total_iter = 0;
 	int skip = 0;
 	int DynamicM = 0;
 	double s0y0 = 0;
@@ -2027,13 +2036,14 @@ void MADPQN::madpqn(double *w, bool disable_smooth)
 	double Q = 0;
 	double eps1 = max(eps,0.0001);
 	double min_eps1 = min(eps, eps1);
-	double gamma = 0;
+	double gamma = ALPHA_MAX;
 	int skip_flag;
 	int64_t timer_st, timer_ed;
 	double accumulated_time = 0;
 	double all_reduce_buffer[3];
 	double alpha;
 	int nr_node = mpi_get_size();
+	int idx_start = start, idx_length = length;
 
 	int *tmprecvcount = new int[nr_node];
 	int *tmpdisplace = new int[nr_node];
@@ -2044,18 +2054,18 @@ void MADPQN::madpqn(double *w, bool disable_smooth)
 	double *loss_g = new double[n];
 	double *local_step = new double[length];
 	double *step = new double[n];
-	double *subw = new double[n];
-	double *subg = new double[n];
+	double *full_g = new double[n];
 	double *R = new double[4 * M * M];
 	double **inner_product_matrix = new double*[M];
+	std::vector<int> global_nonzero_set;
 	double fnew;
 	int counter = 0;
-	int ran_smooth_flag = 0;
+	int ran_smooth_flag = 0; //flag on if last step was a smooth optimization step
 	Stage stage = initial;
 	int latest_index_size = 0;
 	int sparse_communication_flag = 0;
 	int init_max_cg_iter = 5;
-	double cg_increment = 10.0;
+	double cg_increment = 2;
 	int current_max_cg_iter = init_max_cg_iter;
 	int search = 1;
 
@@ -2065,7 +2075,7 @@ void MADPQN::madpqn(double *w, bool disable_smooth)
 	// for alternating between previous and current indices
 	int prev_idx, curr_idx;
 	std::vector<int> index[2], local_index;
-	int global_index_length = 0, index_length = 0;
+	int global_index_length = n, index_length = length;
 	int unchanged_counter = 0;
 
 	global_n = (double)n;
@@ -2075,35 +2085,31 @@ void MADPQN::madpqn(double *w, bool disable_smooth)
 	double *w0 = new double[n];
 	for (i=0; i<n; i++)
 		w0[i] = 0;
-	fun_obj->fun(w0);
+	f = fun_obj->fun(w0);
 	fun_obj->loss_grad(w0, loss_g);
 	alpha = min(max(fabs(fun_obj->vHv(loss_g)), ALPHA_MIN), ALPHA_MAX);
 
-	memset(local_step, 0, sizeof(double) * length);
-	fun_obj->prox_grad(w0 + start, loss_g + start, local_step, local_step, alpha, length);
-	delete [] w0;
-	Q = 0.5 * alpha * ddot_(&length, local_step, &inc, local_step, &inc) + ddot_(&length, loss_g + start, &inc, local_step, &inc);
-	Q += fun_obj->regularizer(local_step, length);
-	mpi_allreduce(&Q, 1, MPI_DOUBLE, MPI_SUM);
-	Q0 = Q;
-	if (Q0 == 0) {
+	// initialize with absolute global index
+	fill_range(index[0], n);
+	fill_range(index[1], n);
+	curr_idx = inner_iter % 2;
+	prev_idx = (inner_iter + 1) % 2;
+	Q = INF;
+
+	Q0 = Q_prox_grad(step, w0, loss_g, n, length, start, &index[0][0], alpha, tmps, &f, &counter);
+	communication = 0;
+	if (Q0 == 0)
+	{
 		info("Q0=0\n");
 		search = 0;
 	}
-
-	communication = 0;
+	delete [] w0;
 
 	f = fun_obj->fun(w);
 	fnew = f;
 	timer_st = wall_clock_ns();
 
-	// initialize with absolute global index
-	fill_range(index[0], n);
-	fill_range(index[1], n);
-	curr_idx = iter % 2;
-	prev_idx = (iter + 1) % 2;
-	Q = INF;
-	while (iter_print < max_iter && search)
+	while (total_iter < max_iter && search)
 	{
 		skip_flag = 0;
 		timer_ed = wall_clock_ns();
@@ -2113,41 +2119,37 @@ void MADPQN::madpqn(double *w, bool disable_smooth)
 			if (w[start + i] != 0)
 				nnz++;
 		mpi_allreduce(&nnz, 1, MPI_INT, MPI_SUM);
-		if (counter == max_modify_Q || Q == 0)
+		if (Q == 0)
 		{
 			info("WARNING: Update Failed\n");
-			if (iter_print <= 1)
+			if (total_iter <= 1)
 				break;
 		}
 		else
-			info("iter=%d m=%d f=%15.20e Q=%g subprobs=%d w_nnz=%d active_set=%d elapsed_time=%g communication=%g\n", iter_print, DynamicM,  f,  Q, counter, nnz, (int)index[curr_idx].size(), accumulated_time,communication);
+			info("iter=%d m=%d f=%15.20e Q=%g subprobs=%d w_nnz=%d active_set=%d elapsed_time=%g communication=%g\n", total_iter, DynamicM,  f,  Q, counter, nnz, (int)index[curr_idx].size(), accumulated_time,communication);
 		timer_st = wall_clock_ns();
 		
-		
-		if (iter_print > 0)
+		if (total_iter > 0)
 		{
 			info("active_size ");
 			for (i = 0; i < nr_node; i++)
-			{
 				info("%d ", tmprecvcount[i]);
-			}
 			info("\n");
 		}
 		double stopping = Q / Q0;
-		if (Q0 == 0.0 || (iter_print > 0 && stopping < eps1))
+		if (total_iter > 0 && stopping < eps1)
 		{
 			if ((int) index[curr_idx].size() == n)
 			{
 				if (stopping <= eps)
 					break;
 				else
-					while (eps1 > stopping)
-						eps1 = max(0.001 * eps1, min_eps1);
+					eps1 = max(0.001 * eps1, min_eps1);
 			}
-			if (iter_print > 0)
+			if (total_iter > 0 && inner_iter >= (min_inner || Q == 0))
 			{
 				DynamicM = 0;
-				iter = 0;
+				inner_iter = 0;
 				skip = 0;
 				k = 0;
 				fill_range(index[0], n);
@@ -2155,6 +2157,9 @@ void MADPQN::madpqn(double *w, bool disable_smooth)
 				local_index.clear();
 				eps1 = max(0.001 * eps1, min_eps1);
 				index_length = 0;
+				global_index_length = n;
+				idx_start = start;
+				idx_length = length;
 			}
 			info("reduce eps1 to %g\n", eps1);
 			fun_obj->loss_grad(w, loss_g);
@@ -2170,9 +2175,9 @@ void MADPQN::madpqn(double *w, bool disable_smooth)
 		// but the sparsity-inducing property of the L1 norm will likely shrink n to be smaller than l
 		// Thus we almost always have s^T y / s^T s >= sigma > 0
 
-		if (iter != 0)
+		if (inner_iter != 0)
 		{
-			if (DynamicM == 0)
+			if ((int)index[curr_idx].size() == n)
 			{
 				daxpy_(&length, &one, loss_g + start, &inc, tmpy, &inc);
 				all_reduce_buffer[0] = ddot_(&length, tmpy, &inc, tmps, &inc);
@@ -2209,8 +2214,9 @@ void MADPQN::madpqn(double *w, bool disable_smooth)
 				skip_flag = 1;
 				skip++;
 			}
-			DynamicM = min(iter - skip, M);
+			DynamicM = min(inner_iter - skip, M);
 		}
+
 		if (!ran_smooth_flag)
 		{
 			int	tmp_idx = curr_idx;
@@ -2232,36 +2238,14 @@ void MADPQN::madpqn(double *w, bool disable_smooth)
 				compute_R(R, DynamicM, inner_product_matrix, k, gamma);
 				k = (k+1)%M;
 			}
-			if (!ran_smooth_flag)
-			{
-				fun_obj->setselection(w, loss_g, index[prev_idx], index[curr_idx], min(Q / Q0,1.0));
-				global_index_length = (int)index[curr_idx].size();
-				if (global_index_length == latest_index_size) // Note here we only checked the size of the index set remained unchanged, but didn't really check whether the elements changed or not
-					unchanged_counter++;
-				else
-					unchanged_counter = 0;
-				latest_index_size = global_index_length;
-
-				local_index.clear();
-				for (std::vector<int>::iterator it = index[curr_idx].begin(); it != index[curr_idx].end(); it++)
-				{
-					if (*it >= start + length)
-						break;
-					if (*it >= start)
-						local_index.push_back(*it - start);
-				}
-				index_length = (int) local_index.size();
-			}
-
 			alpha = 1;
 		}
 		else
 		{
-			alpha = min(max(fabs(fun_obj->vHv(loss_g)), ALPHA_MIN), ALPHA_MAX);
+			alpha = min(max(min(fabs(fun_obj->vHv(loss_g, index[curr_idx])), gamma), ALPHA_MIN), ALPHA_MAX);
 			info("init alpha = %g\n",alpha);
-			global_index_length = n;
 		}
-		if (iter_print > 0)
+		if (total_iter > 0)
 		{
 			if (unchanged_counter >= smooth_trigger)
 			{
@@ -2271,79 +2255,76 @@ void MADPQN::madpqn(double *w, bool disable_smooth)
 			else
 				stage = initial;
 		}
+		if (inner_iter > 0 && !ran_smooth_flag)
+		{
+			fun_obj->setselection(w, loss_g, index[prev_idx], index[curr_idx], min(Q / Q0,1.0));
+			global_index_length = (int)index[curr_idx].size();
+			if (global_index_length == latest_index_size) // Note here we only checked the size of the index set remained unchanged, but didn't really check whether the elements changed or not
+				unchanged_counter++;
+			else
+				unchanged_counter = 0;
+			latest_index_size = global_index_length;
+
+			local_index.clear();
+			for (std::vector<int>::iterator it = index[curr_idx].begin(); it != index[curr_idx].end(); it++)
+			{
+				if (*it >= start + length)
+					break;
+				if (*it >= start)
+					local_index.push_back(*it - start);
+			}
+			index_length = (int) local_index.size();
+			fun_obj->get_local_index_start_and_length(global_index_length, &idx_start, &idx_length);
+		}
+
 		sparse_communication_flag = (global_index_length < n * sparse_factor);
 		memcpy(tmpy, loss_g + start, sizeof(double) * length);
 		dscal_(&length, &minus_one, tmpy, &inc);
-		if (!disable_smooth && stage == smooth && ran_smooth_flag)
+		if (!disable_smooth && (stage == smooth && ran_smooth_flag))
 		{
 			ran_smooth_flag = 0;
-			alpha = gamma;
-			// alpha = fabs(fun_obj->vHv(loss_g, index[curr_idx]));
-			counter = 0;
-
-			for (i=0; i< global_index_length;i++)
+			alpha = min(max(min(fabs(fun_obj->vHv(loss_g, index[curr_idx])), gamma), ALPHA_MIN), ALPHA_MAX);
+			Q = Q_prox_grad(step, w, loss_g, global_index_length, idx_length, idx_start, &index[curr_idx][0], alpha, tmps, &f, &counter);
+			if (Q < 0)
 			{
-				subw[i] = w[index[curr_idx][i]];
-				subg[i] = loss_g[index[curr_idx][i]];
+				inner_iter++;
+				total_iter++;
 			}
-			while (counter == 0 || (counter < max_modify_Q && (fnew - f) / Q < eta))
-			{
-				memset(step, 0 ,sizeof(double) * global_index_length);
-				int idx_start,idx_length;
-				
-				fun_obj->prox_grad(subw, subg, step, step, alpha, global_index_length);
-				fun_obj->get_local_index_start_and_length(global_index_length, &idx_start, &idx_length);
-
-				Q = fun_obj->regularizer(step + idx_start, idx_length) - fun_obj->regularizer(subw + idx_start, idx_length);
-				daxpy_(&global_index_length, &minus_one, subw , &inc, step, &inc);
-				Q += 0.5 * alpha * ddot_(&idx_length, step + idx_start, &inc, step + idx_start, &inc) + ddot_(&idx_length, subg + idx_start, &inc, step + idx_start, &inc);
-				mpi_allreduce(&Q, 1, MPI_DOUBLE, MPI_SUM);
-				communication += 1 / global_n;
-				fnew = fun_obj->f_update(w, step, Q, eta, &index[curr_idx][0], global_index_length, idx_start, idx_length);
-				alpha *= 2;
-				counter++;
-			}
-			if (counter < max_modify_Q && Q < 0)
-			{
-				f = fnew;
-				for (i=0;i<global_index_length;i++)
-					w[index[curr_idx][i]] += step[i];
-				for (i=0;i<global_index_length;i++)
-				{
-					int idx = index[curr_idx][i];
-					if (idx >= start + length)
-						break;
-					if (idx >= start)
-						tmps[idx - start] = step[i];
-				}
-				iter++;
-				iter_print++;
-			}
-			else
-				Q = 0;
 			continue;
 		}
-		else if (!disable_smooth && DynamicM > 0 && stage != initial && !ran_smooth_flag)
+		else if (!disable_smooth && (inner_iter > 0 && stage != initial && !ran_smooth_flag))
 		{
 			// all machines conduct the same CG procedure
-			std::vector<int> global_nonzero_set;
-			int global_nnz_size = global_nonzero_set.size();
-			double *full_g = new double[global_index_length];
+			global_nonzero_set.clear();
 			fun_obj->full_grad(w, loss_g, index[curr_idx], full_g, global_nonzero_set);
+			int global_nnz_size = (int)global_nonzero_set.size();
 			int max_cg_iter = min(global_nnz_size, current_max_cg_iter);
-			if (global_nnz_size < global_index_length || stage != smooth)
+			if (global_nnz_size < global_index_length || stage == alternating)
 			{
 				max_cg_iter = init_max_cg_iter;
 				current_max_cg_iter = init_max_cg_iter;
+				stage = alternating;
 			}
 			double delta = newton(full_g, step, global_nonzero_set, max_cg_iter, w);
-
-			delete[] full_g;
-
 			double step_size;
-			step_size = fun_obj->smooth_line_search(w, step, delta, eta, global_nonzero_set, &fnew);
-			stage = (step_size == 1) ? smooth : alternating;
-			current_max_cg_iter = (step_size == 1) ? int(cg_increment * current_max_cg_iter) : init_max_cg_iter;
+			if (delta >= 0)
+				step_size = 0;
+			else
+			{
+				info("delta = %g\n",delta);
+				step_size = fun_obj->smooth_line_search(w, step, delta, eta, global_nonzero_set, &fnew);
+			}
+
+			if (step_size == 1)
+			{
+				stage = smooth;
+				current_max_cg_iter = int(cg_increment * current_max_cg_iter);
+			}
+			else
+			{
+				stage = alternating;
+				current_max_cg_iter = init_max_cg_iter;
+			}
 			if (step_size <= 0)
 			{
 				unchanged_counter = 0;
@@ -2368,8 +2349,8 @@ void MADPQN::madpqn(double *w, bool disable_smooth)
 				info("**Smooth Step\n");
 				Q = delta;
 				counter = 0;
-				iter++;
-				iter_print++;
+				inner_iter++;
+				total_iter++;
 				continue;
 			}
 		}
@@ -2393,75 +2374,70 @@ void MADPQN::madpqn(double *w, bool disable_smooth)
 
 		ran_smooth_flag = 0;
 		counter = 0;
-		while (counter == 0 || (counter < max_modify_Q && (fnew - f) / Q < eta))
-		{
-			if (DynamicM > 0)
-				Q = SpaRSA(w + start, loss_g + start, R, s, y, gamma, local_step, alpha, DynamicM, local_index);
-			else
-			{
-				memset(step, 0 ,sizeof(double) * n);
-				fun_obj->prox_grad(w, loss_g, step, step, alpha, n);
-				Q = fun_obj->regularizer(step + start, length) - fun_obj->regularizer(w + start, length);
-				daxpy_(&n, &minus_one, w , &inc, step, &inc);
-				memcpy(local_step, step + start, sizeof(double) * length);
 
-				Q += 0.5 * alpha * ddot_(&length, local_step, &inc, local_step, &inc) + ddot_(&length, loss_g + start, &inc, local_step, &inc);
-				mpi_allreduce(&Q, 1, MPI_DOUBLE, MPI_SUM);
-				communication += 1 / global_n;
-			}
-			if (sparse_communication_flag)
-			{
-				//First decide the size to communicate from each machine
-				//Then communication to gather the sparse update
-				//cost: 1 rounds of sparse communication as we have the full index on all machines
-				int rank = mpi_get_rank();
-				MPI_Allgatherv(local_step, (int) index_length, MPI_DOUBLE, step, tmprecvcount, tmpdisplace, MPI_DOUBLE, MPI_COMM_WORLD);
-				communication += global_index_length / global_n;
-				fnew = fun_obj->f_update(w, step, Q, eta, &index[curr_idx][0], global_index_length, tmpdisplace[rank], tmprecvcount[rank]);
-			}
-			else
-			{
-				if (DynamicM > 0 && index_length < length) // Change from sparse storage to dense storage for the local update step
-				{
-					for (i=index_length-1;i >= 0; i--)
-					{
-						if (local_index[i] == i)
-							break;
-						local_step[local_index[i]] = local_step[i];
-						local_step[i] = 0;
-					}
-				}
-				if (DynamicM > 0)
-				{
-					MPI_Allgatherv(local_step, length, MPI_DOUBLE, step, recv_count, displace, MPI_DOUBLE, MPI_COMM_WORLD);
-					communication += 1.0;
-				}
-				fnew = fun_obj->f_update(w, step, Q, eta);
-			}
-			alpha *= 2;
-			counter++;
-		}
-		if (counter < max_modify_Q)
+		if (DynamicM == 0)
 		{
-			f = fnew;
-			if (sparse_communication_flag) // sparse communication
+			Q = Q_prox_grad(step, w, loss_g, global_index_length, idx_length, idx_start, &index[curr_idx][0], alpha, tmps, &f, &counter);
+			if (Q < 0)
 			{
-				for (i=0;i<global_index_length;i++)
-					w[index[curr_idx][i]] += step[i];
-				for (i=0;i<index_length;i++)
-					tmps[local_index[i]] = local_step[i];
+				inner_iter++;
+				total_iter++;
 			}
-			else
-			{
-				daxpy_(&n, &one, step, &inc, w, &inc);
-				memcpy(tmps, local_step, sizeof(double) * length);
-			}
-
-			iter++;
-			iter_print++;
 		}
 		else
-			Q = 0;
+		{
+			do
+			{
+				Q = SpaRSA(w + start, loss_g + start, R, s, y, gamma, local_step, alpha, DynamicM, local_index);
+				if (sparse_communication_flag)
+				{
+					//First decide the size to communicate from each machine
+					//Then communication to gather the sparse update
+					//cost: 1 rounds of sparse communication as we have the full index on all machines
+					int rank = mpi_get_rank();
+					MPI_Allgatherv(local_step, (int) index_length, MPI_DOUBLE, step, tmprecvcount, tmpdisplace, MPI_DOUBLE, MPI_COMM_WORLD);
+					communication += global_index_length / global_n;
+					fnew = fun_obj->f_update(w, step, Q, eta, &index[curr_idx][0], global_index_length, tmpdisplace[rank], tmprecvcount[rank]);
+				}
+				else
+				{
+					if (index_length < length) // Change from sparse storage to dense storage for the local update step
+						for (i=index_length-1;i >= 0; i--)
+						{
+							if (local_index[i] == i)
+								break;
+							local_step[local_index[i]] = local_step[i];
+							local_step[i] = 0;
+						}
+					MPI_Allgatherv(local_step, length, MPI_DOUBLE, step, recv_count, displace, MPI_DOUBLE, MPI_COMM_WORLD);
+					communication += 1.0;
+					fnew = fun_obj->f_update(w, step, Q, eta);
+				}
+				alpha *= 2;
+				counter++;
+			} while (counter < max_modify_Q && (Q > 0 || (fnew - f > eta * Q)));
+
+			if (counter < max_modify_Q && Q < 0)
+			{
+				f = fnew;
+				if (sparse_communication_flag) // sparse communication
+				{
+					for (i=0;i<global_index_length;i++)
+						w[index[curr_idx][i]] += step[i];
+					for (i=0;i<index_length;i++)
+						tmps[local_index[i]] = local_step[i];
+				}
+				else
+				{
+					daxpy_(&n, &one, step, &inc, w, &inc);
+					memcpy(tmps, local_step, sizeof(double) * length);
+				}
+				inner_iter++;
+				total_iter++;
+			}
+			else
+				Q = 0;
+		}
 	}
 
 	delete[] step;
@@ -2476,8 +2452,74 @@ void MADPQN::madpqn(double *w, bool disable_smooth)
 		delete[] inner_product_matrix[i];
 	delete[] inner_product_matrix;
 	delete[] R;
-	delete [] subw;
-	delete [] subg;
+	delete[] full_g;
+}
+
+double MADPQN::Q_prox_grad(double *step, double *w, double *g, int global_length, int local_length, int local_start, int *index, double alpha, double *tmps, double *f, int *counter_ret)
+{
+	int inc = 1;
+	double minus_one = -1.0;
+	int counter = 0;
+	double *wptr;
+	double *gptr;
+	const int max_modify_Q = 30;
+	int w_size = fun_obj->get_nr_variable();
+	int i;
+	double Q = 0;
+	double fnew = *f;
+	if (global_length < w_size)
+	{
+		wptr = new double[global_length];
+		gptr = new double[global_length];
+		for (i=0; i<global_length;i++)
+		{
+			wptr[i] = w[index[i]];
+			gptr[i] = g[index[i]];
+		}
+	}
+	else
+	{
+		wptr = w;
+		gptr = g;
+	}
+
+	do
+	{
+		memset(step, 0, sizeof(double) * global_length);
+		fun_obj->prox_grad(wptr, gptr, step, step, alpha, global_length);
+		Q = fun_obj->regularizer(step + local_start, local_length) - fun_obj->regularizer(wptr + local_start, local_length);
+		daxpy_(&global_length, &minus_one, wptr , &inc, step, &inc);
+		Q += 0.5 * alpha * ddot_(&local_length, step + local_start, &inc, step + local_start, &inc) + ddot_(&local_length, gptr + local_start, &inc, step + local_start, &inc);
+		mpi_allreduce(&Q, 1, MPI_DOUBLE, MPI_SUM);
+		communication += 1 / global_n;
+		fnew = fun_obj->f_update(w, step, Q, eta, index, global_length, local_start, local_length);
+		alpha *= 2;
+		counter++;
+	} while (counter < max_modify_Q && (Q > 0 || (fnew - (*f) > eta * Q)));
+	*counter_ret = counter;
+
+	if (counter < max_modify_Q && Q < 0)
+	{
+		*f = fnew;
+		for (i=0;i<global_length;i++)
+			w[index[i]] += step[i];
+		for (i=0;i<global_length;i++)
+		{
+			int idx = index[i];
+			if (idx >= start + length)
+				break;
+			if (idx >= start)
+				tmps[idx - start] = step[i];
+		}
+	}
+	else
+		Q = 0;
+	if (global_length < w_size)
+	{
+		delete[] wptr;
+		delete[] gptr;
+	}
+	return Q;
 }
 
 void MADPQN::update_inner_products(double **inner_product_matrix, int k, int DynamicM, double *s, double *y, const std::vector<int> &index)
@@ -2560,7 +2602,7 @@ void MADPQN::compute_R(double *R, int DynamicM, double **inner_product_matrix, i
 double MADPQN::SpaRSA(double *w, double *loss_g, double *R, double *s, double *y, double gamma, double *local_step, double scaling, int DynamicM, std::vector<int> &index)
 {
 	const double eta = .01 / 2;
-	const double ALPHA_MAX = 1e30;
+	const double ALPHA_MAX = 1e10;
 	const double ALPHA_MIN = 1e-4;
 
 	int i,j;
@@ -2816,6 +2858,7 @@ double MADPQN::SpaRSA(double *w, double *loss_g, double *R, double *s, double *y
 	return oldquadratic / 2 + accumulated_improve;
 }
 
+
 double MADPQN::newton(double *g, double *step, const std::vector<int> &global_nonzero_set, int max_cg_iter, double *w)
 {
 	int sub_length = (int) global_nonzero_set.size();
@@ -2861,11 +2904,39 @@ double MADPQN::newton(double *g, double *step, const std::vector<int> &global_no
 		fun_obj->Hv(d, Hd, global_nonzero_set, w);
 		dHd = ddot_(&sub_length, d, &inc, Hd, &inc);
 		dTd = ddot_(&sub_length, d, &inc, d, &inc);
+		if (dHd / dTd <= psd_threshold)
+		{
+			cg_iter--;
+			info("WARNING: dHd / dTd <= PSD threshold\n");
+			break;
+		}
 
 		alpha = zTr/dHd;
 		daxpy_(&sub_length, &alpha, d, &inc, step, &inc);
 		alpha = -alpha;
+		gs = ddot_(&sub_length, g, &inc, step, &inc);
+		if (gs >= 0)
+		{
+			cg_iter--;
+			info("gs >= 0 in CG\n");
+			daxpy_(&sub_length, &alpha, d, &inc, step, &inc);
+			break;
+		}
+
+		sTs = ddot_(&sub_length, step, &inc, step, &inc);
+		if (sTs >= cg_boundary)
+		{
+			info("WARNING: reaching cg boundary\n");
+			break;
+		}
+
 		daxpy_(&sub_length, &alpha, Hd, &inc, r, &inc);
+		sHs = -ddot_(&sub_length, r, &inc, step, &inc) - gs;
+		if (sHs / sTs <= psd_threshold)
+		{
+			info("WARNING: sHs / sTs <= PSD threshold\n");
+			break;
+		}
 
 		for (i=0; i<sub_length; i++)
 			z[i] = r[i] / M[i];
@@ -2875,27 +2946,18 @@ double MADPQN::newton(double *g, double *step, const std::vector<int> &global_no
 		dscal_(&sub_length, &beta, d, &inc);
 		daxpy_(&sub_length, &one, z, &inc, d, &inc);
 		zTr = znewTrnew;
-
-		if (dHd / dTd <= psd_threshold)
-			break;
-		sTs = ddot_(&sub_length, step, &inc, step, &inc);
-		if (sTs > cg_boundary)
-			break;
-
-		gs = ddot_(&sub_length, g, &inc, step, &inc);
-		sHs = -ddot_(&sub_length, r, &inc, step, &inc) - gs;
-		if (sHs / sTs <= psd_threshold)
-			break;
 		rTr= ddot_(&sub_length, r, &inc, r, &inc);
 	}
+	double delta =  0.5 * sHs + gs;
+	if (gs < 0 && delta >= 0)
+		delta = gs;
+
 	info("CG Iter = %d\n", cg_iter);
 
 	if (cg_iter == max_cg_iter)
 		info("WARNING: reaching maximal number of CG steps\n");
 
 	// double delta = 0.5 * ddot_(&sub_length, g, &inc, step, &inc) - 0.5 * ddot_(&sub_length, r, &inc, step, &inc);
-	double delta =  0.5 * sHs + gs;
-	//info("gnorm = %g\n", gnorm);
 
 	delete[] d;
 	delete[] Hd;
@@ -3101,19 +3163,9 @@ static void train_one(const problem *prob, const parameter *param, double *w)
 				fprintf(stderr, "ERROR: unknown problem_type\n");
 	}
 
-	switch(param->solver_type)
-	{
-		case SOLVER_MADPQN:
-		{
-			MADPQN madpqn_obj(l1r_fun_obj, primal_solver_tol, param->m, param->inner_eps, param->max_inner_iter, param->eta);
-			madpqn_obj.set_print_string(liblinear_print_string);
-			madpqn_obj.madpqn(w, param->disable_smooth);
-			break;
-		}
-		default:
-			if(mpi_get_rank() == 0)
-				fprintf(stderr, "ERROR: unknown solver_type\n");
-	}
+	MADPQN madpqn_obj(l1r_fun_obj, primal_solver_tol, param->m, param->inner_eps, param->max_inner_iter, param->eta);
+	madpqn_obj.set_print_string(liblinear_print_string);
+	madpqn_obj.madpqn(w, param->disable_smooth);
 
 	if (param->permute_features)
 	{
@@ -3223,23 +3275,13 @@ model* train(const problem *prob, const parameter *param)
 			}
 			grouplasso_mlr_fun mlr_fun_obj(&prob_col, param->C, nr_class);
 
-			switch(param->solver_type)
-			{
-				case SOLVER_MADPQN:
-					{
-						MADPQN madpqn_obj(&mlr_fun_obj, param->eps, param->m, param->inner_eps, param->max_inner_iter, param->eta);
-						madpqn_obj.set_print_string(liblinear_print_string);
-						madpqn_obj.madpqn(model_->w, param->disable_smooth);
-						break;
-					}
-				default:
-					if(mpi_get_rank() == 0)
-						fprintf(stderr, "ERROR: unknown solver_type\n");
-			}
+			MADPQN madpqn_obj(&mlr_fun_obj, param->eps, param->m, param->inner_eps, param->max_inner_iter, param->eta);
+			madpqn_obj.set_print_string(liblinear_print_string);
+			madpqn_obj.madpqn(model_->w, param->disable_smooth);
 
 			if (param->permute_features)
 			{
-				w_tmp = new double[n];
+				w_tmp = new double[n * nr_class];
 				for(int i = 0; i < n * nr_class; i++)
 					w_tmp[i] = model_->w[i];
 				for(int i = 0; i < n; i++)
@@ -3656,9 +3698,6 @@ const char *check_parameter(const problem *prob, const parameter *param)
 
 	if(param->C <= 0)
 		return "C <= 0";
-
-	if(param->solver_type != SOLVER_MADPQN)
-		return "unknown solver type";
 
 	if(param->problem_type != L1R_LR
 	&& param->problem_type != LASSO
