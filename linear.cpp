@@ -1888,7 +1888,6 @@ void MADPQN::madpqn(double *w, bool disable_smooth)
 	double *full_g = new double[n];
 	double *R = new double[4 * M * M];
 	double **inner_product_matrix = new double*[M];
-	std::vector<int> global_nonzero_set;
 	double fnew;
 	int counter = 0;
 	int ran_smooth_flag = 0; //flag on if last step was a smooth optimization step
@@ -1970,7 +1969,7 @@ void MADPQN::madpqn(double *w, bool disable_smooth)
 				else
 					eps1 = max(0.001 * eps1, min_eps1);
 			}
-			if (total_iter > 0 && inner_iter >= (min_inner || Q == 0))
+			if (inner_iter >= min_inner || Q == 0)
 			{
 				DynamicM = 0;
 				inner_iter = 0;
@@ -2112,6 +2111,7 @@ void MADPQN::madpqn(double *w, bool disable_smooth)
 		else if (!disable_smooth && (inner_iter > 0 && stage != initial && !ran_smooth_flag))
 		{
 			// all machines conduct the same CG procedure
+			std::vector<int> global_nonzero_set;
 			global_nonzero_set.clear();
 			fun_obj->full_grad(w, loss_g, index[curr_idx], full_g, global_nonzero_set);
 			int global_nnz_size = (int)global_nonzero_set.size();
@@ -2714,7 +2714,6 @@ double MADPQN::newton(double *g, double *step, const std::vector<int> &global_no
 		dTd = ddot_(&sub_length, d, &inc, d, &inc);
 		if (dHd / dTd <= psd_threshold)
 		{
-			cg_iter--;
 			info("WARNING: dHd / dTd <= PSD threshold\n");
 			break;
 		}
@@ -2725,7 +2724,6 @@ double MADPQN::newton(double *g, double *step, const std::vector<int> &global_no
 		gs = ddot_(&sub_length, g, &inc, step, &inc);
 		if (gs >= 0)
 		{
-			cg_iter--;
 			info("gs >= 0 in CG\n");
 			daxpy_(&sub_length, &alpha, d, &inc, step, &inc);
 			break;
