@@ -161,12 +161,12 @@ void do_predict(FILE *input, FILE *output)
 	}
 	mpi_allreduce(&total, 1, MPI_INT, MPI_SUM);
 	mpi_allreduce(&correct, 1, MPI_INT, MPI_SUM);
-	mpi_allreduce(&error, 1, MPI_INT, MPI_SUM);
-	mpi_allreduce(&sump, 1, MPI_INT, MPI_SUM);
-	mpi_allreduce(&sumt, 1, MPI_INT, MPI_SUM);
-	mpi_allreduce(&sumpp, 1, MPI_INT, MPI_SUM);
-	mpi_allreduce(&sumtt, 1, MPI_INT, MPI_SUM);
-	mpi_allreduce(&sumpt, 1, MPI_INT, MPI_SUM);
+	mpi_allreduce(&error, 1, MPI_DOUBLE, MPI_SUM);
+	mpi_allreduce(&sump, 1, MPI_DOUBLE, MPI_SUM);
+	mpi_allreduce(&sumt, 1, MPI_DOUBLE, MPI_SUM);
+	mpi_allreduce(&sumpp, 1, MPI_DOUBLE, MPI_SUM);
+	mpi_allreduce(&sumtt, 1, MPI_DOUBLE, MPI_SUM);
+	mpi_allreduce(&sumpt, 1, MPI_DOUBLE, MPI_SUM);
 	if(mpi_get_rank() == 0)
 	{
 		if(check_regression_model(model_))
