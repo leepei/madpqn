@@ -31,7 +31,7 @@ void exit_with_help()
 	"-q : quiet mode (no outputs)\n"
 	"-m m : use information from the past m iterations (default 10)\n"
 	"-p : permute features\n"
-	"-S : disable smooth stage for -s 0\n"
+    "-S : disable smooth stage\n"
 	);
 	mpi_exit(1);
 }
@@ -125,7 +125,6 @@ void parse_command_line(int argc, char **argv, char *input_file_name, char *mode
 	void (*print_func)(const char*) = NULL;	// default printing to stdout
 
 	// default values
-	param.solver_type = SOLVER_MADPQN;
 	param.C = 1.0;
 	param.eps = 0.0001; // see setting below
 	param.m = 10;
@@ -146,10 +145,6 @@ void parse_command_line(int argc, char **argv, char *input_file_name, char *mode
 			exit_with_help();
 		switch(argv[i-1][1])
 		{
-			case 's':
-				param.solver_type = atoi(argv[i]);
-				break;
-
 			case 'P':
 				param.problem_type = atoi(argv[i]);
 				break;

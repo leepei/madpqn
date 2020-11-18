@@ -22,13 +22,10 @@ struct problem
 	int global_l;
 };
 
-/* solver_type */
-enum { SOLVER_MADPQN };
 enum { L1R_LR, LASSO, L1R_L2_LOSS_SVC, GROUPLASSO_MLR};
 
 struct parameter
 {
-	int solver_type;
 	int problem_type;
 
 	/* these are for training only */

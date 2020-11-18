@@ -439,6 +439,8 @@ double l1r_fun::f_update(double *w, double *step, double Q, double eta, int *ind
 		f_new += loss(i, Xw[i]);
 	f_new *= C;
 	f_new += reg_diff;
+	//If profiling gets sparsity, should consider and only updating individual losses
+	//This should be the case when data has sparsity and the update is extremely sparse
 	mpi_allreduce(&f_new, 1, MPI_DOUBLE, MPI_SUM);
 	communication += 1 / global_n;
 	f_new += reg;
@@ -685,6 +687,7 @@ double l1r_fun::smooth_line_search(double *w, double *smooth_step, double delta,
 		double f_new = 0;
 		for(i=0; i<l; i++)
 			f_new += loss(i, Xw[i]);
+		//If profiling gets sparsity, should consider tracking loss as a sum and only update individual losses
 		mpi_allreduce(&f_new, 1, MPI_DOUBLE, MPI_SUM);
 		f_new = f_new * C + reg + reg_diff * step_size;
 		communication += 1 / global_n;
@@ -758,6 +761,7 @@ double l1r_fun::armijo_line_search(double *step, double *w, double *loss_g, doub
 			cond += loss(i,Xw[i]);
 		cond *= C;
 		cond += reg_diff;
+		//If profiling gets sparsity, should consider tracking loss as a sum and only update individual losses
 		mpi_allreduce(&cond, 1, MPI_DOUBLE, MPI_SUM);
 		communication += 1 / global_n;
 		if (cond + reg - current_f <= delta * localstepsize)
@@ -1143,6 +1147,8 @@ double grouplasso_mlr_fun::f_update(double *w, double *step, double Q, double et
 		f_new += loss(i, Xw + nr_class * i);
 	f_new *= C;
 	f_new += reg_diff;
+	//If profiling gets sparsity, should consider and only updating individual losses
+	//This should be the case when data has sparsity and the update is extremely sparse
 	mpi_allreduce(&f_new, 1, MPI_DOUBLE, MPI_SUM);
 	communication += 1 / global_n;
 	f_new += reg;
@@ -1425,6 +1431,7 @@ double grouplasso_mlr_fun::armijo_line_search(double *step, double *w, double *l
 			cond += loss(i, Xw + nr_class * i);;
 		cond *= C;
 		cond += reg_diff;
+		//If profiling gets sparsity, should consider tracking loss as a sum and only update individual losses
 		mpi_allreduce(&cond, 1, MPI_DOUBLE, MPI_SUM);
 		communication += 1 / global_n;
 		if (cond + reg - current_f <= delta * localstepsize)
@@ -1884,7 +1891,7 @@ void MADPQN::madpqn(double *w, bool disable_smooth)
 	std::vector<int> global_nonzero_set;
 	double fnew;
 	int counter = 0;
-	int ran_smooth_flag = 0;
+	int ran_smooth_flag = 0; //flag on if last step was a smooth optimization step
 	Stage stage = initial;
 	int latest_index_size = 0;
 	int sparse_communication_flag = 0;
