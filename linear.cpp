@@ -1881,6 +1881,7 @@ void MADPQN::madpqn(double *w, bool disable_smooth)
 	double *full_g = new double[n];
 	double *R = new double[4 * M * M];
 	double **inner_product_matrix = new double*[M];
+	std::vector<int> global_nonzero_set;
 	double fnew;
 	int counter = 0;
 	int ran_smooth_flag = 0;
@@ -1952,7 +1953,6 @@ void MADPQN::madpqn(double *w, bool disable_smooth)
 			info("iter=%d m=%d f=%15.20e Q=%g subprobs=%d w_nnz=%d active_set=%d elapsed_time=%g communication=%g\n", total_iter, DynamicM,  f,  Q, counter, nnz, (int)index[curr_idx].size(), accumulated_time,communication);
 		timer_st = wall_clock_ns();
 		
-		
 		double stopping = Q / Q0;
 		if (total_iter > 0 && stopping < eps1)
 		{
@@ -1963,7 +1963,7 @@ void MADPQN::madpqn(double *w, bool disable_smooth)
 				else
 					eps1 = max(0.001 * eps1, min_eps1);
 			}
-			if (inner_iter >= min_inner || Q == 0)
+			if (total_iter > 0 && inner_iter >= (min_inner || Q == 0))
 			{
 				DynamicM = 0;
 				inner_iter = 0;
@@ -2105,7 +2105,6 @@ void MADPQN::madpqn(double *w, bool disable_smooth)
 		else if (!disable_smooth && (inner_iter > 0 && stage != initial && !ran_smooth_flag))
 		{
 			// all machines conduct the same CG procedure
-			std::vector<int> global_nonzero_set;
 			global_nonzero_set.clear();
 			fun_obj->full_grad(w, loss_g, index[curr_idx], full_g, global_nonzero_set);
 			int global_nnz_size = (int)global_nonzero_set.size();
@@ -2661,6 +2660,7 @@ double MADPQN::SpaRSA(double *w, double *loss_g, double *R, double *s, double *y
 	return oldquadratic / 2 + accumulated_improve;
 }
 
+
 double MADPQN::newton(double *g, double *step, const std::vector<int> &global_nonzero_set, int max_cg_iter, double *w)
 {
 	int sub_length = (int) global_nonzero_set.size();
@@ -2707,6 +2707,7 @@ double MADPQN::newton(double *g, double *step, const std::vector<int> &global_no
 		dTd = ddot_(&sub_length, d, &inc, d, &inc);
 		if (dHd / dTd <= psd_threshold)
 		{
+			cg_iter--;
 			info("WARNING: dHd / dTd <= PSD threshold\n");
 			break;
 		}
@@ -2717,6 +2718,7 @@ double MADPQN::newton(double *g, double *step, const std::vector<int> &global_no
 		gs = ddot_(&sub_length, g, &inc, step, &inc);
 		if (gs >= 0)
 		{
+			cg_iter--;
 			info("gs >= 0 in CG\n");
 			daxpy_(&sub_length, &alpha, d, &inc, step, &inc);
 			break;
@@ -2960,19 +2962,9 @@ static void train_one(const problem *prob, const parameter *param, double *w)
 				fprintf(stderr, "ERROR: unknown problem_type\n");
 	}
 
-	switch(param->solver_type)
-	{
-		case SOLVER_MADPQN:
-		{
-			MADPQN madpqn_obj(l1r_fun_obj, primal_solver_tol, param->m, param->inner_eps, param->max_inner_iter, param->eta);
-			madpqn_obj.set_print_string(liblinear_print_string);
-			madpqn_obj.madpqn(w, param->disable_smooth);
-			break;
-		}
-		default:
-			if(mpi_get_rank() == 0)
-				fprintf(stderr, "ERROR: unknown solver_type\n");
-	}
+	MADPQN madpqn_obj(l1r_fun_obj, primal_solver_tol, param->m, param->inner_eps, param->max_inner_iter, param->eta);
+	madpqn_obj.set_print_string(liblinear_print_string);
+	madpqn_obj.madpqn(w, param->disable_smooth);
 
 	if (param->permute_features)
 	{
@@ -3082,23 +3074,13 @@ model* train(const problem *prob, const parameter *param)
 			}
 			grouplasso_mlr_fun mlr_fun_obj(&prob_col, param->C, nr_class);
 
-			switch(param->solver_type)
-			{
-				case SOLVER_MADPQN:
-					{
-						MADPQN madpqn_obj(&mlr_fun_obj, param->eps, param->m, param->inner_eps, param->max_inner_iter, param->eta);
-						madpqn_obj.set_print_string(liblinear_print_string);
-						madpqn_obj.madpqn(model_->w, param->disable_smooth);
-						break;
-					}
-				default:
-					if(mpi_get_rank() == 0)
-						fprintf(stderr, "ERROR: unknown solver_type\n");
-			}
+			MADPQN madpqn_obj(&mlr_fun_obj, param->eps, param->m, param->inner_eps, param->max_inner_iter, param->eta);
+			madpqn_obj.set_print_string(liblinear_print_string);
+			madpqn_obj.madpqn(model_->w, param->disable_smooth);
 
 			if (param->permute_features)
 			{
-				w_tmp = new double[n];
+				w_tmp = new double[n * nr_class];
 				for(int i = 0; i < n * nr_class; i++)
 					w_tmp[i] = model_->w[i];
 				for(int i = 0; i < n; i++)
@@ -3515,9 +3497,6 @@ const char *check_parameter(const problem *prob, const parameter *param)
 
 	if(param->C <= 0)
 		return "C <= 0";
-
-	if(param->solver_type != SOLVER_MADPQN)
-		return "unknown solver type";
 
 	if(param->problem_type != L1R_LR
 	&& param->problem_type != LASSO
