@@ -508,8 +508,10 @@ double l1r_fun::vHv(double *s, const std::vector<int> &index)
 	int i;
 	int inc = 1;
 	int l=prob->l;
+	int index_size = (int) index.size();
+	bool dense = (index[0] == -1 || index_size == get_nr_variable());
 
-	if (index[0] == -1)
+	if (dense)
 		Xv(s, z);
 	else
 		Xv(s, z, index.data(), (int) index.size());
@@ -518,11 +520,10 @@ double l1r_fun::vHv(double *s, const std::vector<int> &index)
 		alpha += z[i] * z[i] * D[i];// v^THv = C (Xv)^T D (Xv)
 	double buffer[2];
 	double norm2;
-	if (index[0] == -1)
+	if (dense)
 		norm2 = ddot_(&length, s + start, &inc, s + start, &inc);
 	else
 	{
-		int index_size = (int) index.size();
 		int nr_node = mpi_get_size();
 		int rank = mpi_get_rank();
 		int shift = int(ceil(double(index_size) / double(nr_node)));
@@ -530,7 +531,9 @@ double l1r_fun::vHv(double *s, const std::vector<int> &index)
 		int indexlength = min(max(index_size - indexstart, 0), shift);
 		if (indexlength == 0)
 			indexstart = 0;
-		norm2 = ddot_(&indexlength, s + indexstart, &inc, s + indexstart, &inc);
+		norm2 = 0;
+		for (i=0;i<indexlength;i++)
+			norm2 += s[index[indexstart + i]] * s[index[indexstart + i]];
 	}
 	buffer[0] = alpha;
 	buffer[1] = norm2;
@@ -1240,7 +1243,10 @@ double grouplasso_mlr_fun::vHv(double *s, const std::vector<int> &index)
 	int i,j;
 	int inc = 1;
 
-	if (index[0] == -1)
+	int index_size = (int) index.size();
+	bool dense = (index[0] == -1 || index_size == get_nr_variable());
+
+	if (dense)
 		Xv(s, z);
 	else
 		Xv(s, z, index.data(), (int) index.size());
@@ -1258,7 +1264,7 @@ double grouplasso_mlr_fun::vHv(double *s, const std::vector<int> &index)
 
 	double buffer[2];
 	double norm2;
-	if (index[0] == -1)
+	if (dense)
 		norm2 = ddot_(&length, s + start, &inc, s + start, &inc);
 	else
 	{
@@ -1270,7 +1276,9 @@ double grouplasso_mlr_fun::vHv(double *s, const std::vector<int> &index)
 		int indexlength = min(max(index_size - indexstart, 0), shift);
 		if (indexlength == 0)
 			indexstart = 0;
-		norm2 = ddot_(&indexlength, s + indexstart, &inc, s + indexstart, &inc);
+		norm2 = 0;
+		for (i=0;i<indexlength;i++)
+			norm2 += s[index[indexstart + i]] * s[index[indexstart + i]];
 	}
 	buffer[0] = alpha;
 	buffer[1] = norm2;
@@ -1907,6 +1915,7 @@ void MADPQN::madpqn(double *w, bool disable_smooth)
 	std::vector<int> index[2], local_index;
 	int global_index_length = n, index_length = length;
 	int unchanged_counter = 0;
+	int outer_iter = 1;
 
 	global_n = (double)n;
 
@@ -1938,6 +1947,8 @@ void MADPQN::madpqn(double *w, bool disable_smooth)
 	f = fun_obj->fun(w);
 	fnew = f;
 	timer_st = wall_clock_ns();
+	info("\nOuter Iteration %d\n",outer_iter);
+	outer_iter++;
 
 	while (total_iter < max_iter && search)
 	{
@@ -1971,6 +1982,8 @@ void MADPQN::madpqn(double *w, bool disable_smooth)
 			}
 			if (inner_iter >= min_inner || Q == 0)
 			{
+				info("\nOuter Iteration %d:\n",outer_iter);
+				outer_iter++;
 				DynamicM = 0;
 				inner_iter = 0;
 				skip = 0;
