@@ -1255,7 +1255,12 @@ double grouplasso_mlr_fun::vHv(double *s, const std::vector<int> &index)
 	if (dense)
 		Xv(s, z);
 	else
-		Xv(s, z, index.data(), (int) index.size());
+	{
+		subs = new double[index_size];
+		for (i=0;i<index_size;i++)
+			subs[i] = s[index[i]];
+		Xv(subs, z, index.data(), index_size);
+	}
 	double alpha = 0;
 	for(i=0;i<Xw_length;i+=nr_class)
 	{
@@ -1282,9 +1287,7 @@ double grouplasso_mlr_fun::vHv(double *s, const std::vector<int> &index)
 		int indexlength = min(max(index_size - indexstart, 0), shift);
 		if (indexlength == 0)
 			indexstart = 0;
-		norm2 = 0;
-		for (i=0;i<indexlength;i++)
-			norm2 += s[index[indexstart + i]] * s[index[indexstart + i]];
+		norm2 = ddot_(&indexlength, subs + indexstart, &inc, subs + indexstart, &inc);
 	}
 	buffer[0] = alpha;
 	buffer[1] = norm2;
@@ -1292,6 +1295,9 @@ double grouplasso_mlr_fun::vHv(double *s, const std::vector<int> &index)
 	norm2 = buffer[1];
 	alpha = buffer[0] * C / norm2;
 	communication += 2 / global_n;
+	if (!dense)
+		delete[] subs;
+
 	return alpha;
 }
 
