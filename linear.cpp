@@ -510,11 +510,17 @@ double l1r_fun::vHv(double *s, const std::vector<int> &index)
 	int l=prob->l;
 	int index_size = (int) index.size();
 	bool dense = (index[0] == -1 || index_size == get_nr_variable());
+	double *subs;
 
 	if (dense)
 		Xv(s, z);
 	else
-		Xv(s, z, index.data(), (int) index.size());
+	{
+		subs = new double[index_size];
+		for (i=0;i<index_size;i++)
+			subs[i] = s[index[i]];
+		Xv(subs, z, index.data(), index_size);
+	}
 	double alpha = 0;
 	for(i=0;i<l;i++)
 		alpha += z[i] * z[i] * D[i];// v^THv = C (Xv)^T D (Xv)
@@ -531,9 +537,7 @@ double l1r_fun::vHv(double *s, const std::vector<int> &index)
 		int indexlength = min(max(index_size - indexstart, 0), shift);
 		if (indexlength == 0)
 			indexstart = 0;
-		norm2 = 0;
-		for (i=0;i<indexlength;i++)
-			norm2 += s[index[indexstart + i]] * s[index[indexstart + i]];
+		norm2 = ddot_(&indexlength, subs + indexstart, &inc, subs + indexstart, &inc);
 	}
 	buffer[0] = alpha;
 	buffer[1] = norm2;
@@ -541,6 +545,8 @@ double l1r_fun::vHv(double *s, const std::vector<int> &index)
 	norm2 = buffer[1];
 	alpha = buffer[0] * C / norm2;
 	communication += 2 / global_n;
+	if (!dense)
+		delete[] subs;
 
 	return alpha;
 }
