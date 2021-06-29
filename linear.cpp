@@ -880,7 +880,7 @@ double lasso::loss(int i, double xw_i)
 void lasso::update_zD()
 {
 	for(int i=0;i<prob->l;i++)
-		z[i] = Xw[i] - prob->y[i];
+		z[i] = C * (Xw[i] - prob->y[i]);
 }
 
 l1r_l2_svc_fun::l1r_l2_svc_fun(const problem *prob, double C):
@@ -1251,6 +1251,7 @@ double grouplasso_mlr_fun::vHv(double *s, const std::vector<int> &index)
 
 	int index_size = (int) index.size();
 	bool dense = (index[0] == -1 || index_size == get_nr_variable());
+	double *subs;
 
 	if (dense)
 		Xv(s, z);
@@ -1756,6 +1757,7 @@ void grouplasso_mlr_fun::update_zD()
 	memcpy(D, z, sizeof(double)* Xw_length);
 	for(int i=0;i<prob->l;i++)
 		z[i * nr_class + (int) prob->y[i]] -= 1;
+	dscal_(&Xw_length, &C, z, &inc);
 }
 
 // begin of solvers
